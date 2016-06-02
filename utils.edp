@@ -1,0 +1,38 @@
+// ------------------------ clip func ----------------------------------
+func int clip(real [int] &arr,real minval,real maxval){
+  if (arr.max>maxval || arr.min<minval)
+  {
+    for (int i;i<arr.n;i++){
+      if (arr[i]<minval) arr[i] = minval;
+      if (arr[i]>maxval) arr[i] = maxval;
+    }
+  }
+}
+
+// ------------------------ Output Time Units -----------------------
+func real ValueOutput(real value, real controlvalue){
+  if (controlvalue<hour) return value;
+  if (controlvalue>=hour && controlvalue<day) return value/hour;
+  if (controlvalue>=day) return value/day;
+}
+func string UnitsOutput(real value){
+  if (value<hour) return " (s)";
+  if (value>=hour && value<day) return " (hours)";
+  if (value>=day) return " (day)";
+}
+// ------------------------ Restart Read -----------------------
+func bool ReadParameter(string filename,real [int] &param){
+	{
+		ifstream ff(filename);
+		int nnodes;
+		ff >> nnodes;
+		assert(param.n==nnodes);
+		for (int i;i<nnodes;++i){
+			ff >> param[i];
+		}
+		cout<<param;
+		return 1;
+	}
+}
+
+// ReadParameter("pressure.txt",p[]);

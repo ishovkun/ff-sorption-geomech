@@ -1,0 +1,17 @@
+
+// Unit Conversion
+real psia = 6894.75729;
+real atm = 101325;
+real ft = 0.3048;
+real in = 0.0254;
+real Da = 9.869233e-13; // darcies to m^2
+real mDa = 1e-3*Da;
+real scf =  0.0283058557; // stf to m^3 (Wiki)
+real ton = 1000; // tonnes to kg
+real hour = 60*60;
+real day = hour*24;
+real year = 365*day;
+
+
+// cout<< 823*psia<<endl;
+// cout<< 334*ft^3/1000<<endl;

@@ -1,0 +1,340 @@
+/*
+Sorbtion formulation.
+Coupled term (sorbtion swelling) in effective stress.
+Sorbtion terms in momentum transport
+parameters for coal
+*/
+
+// verbosity = 1;
+load "iovtk"
+include "units.edp"
+include "utils.edp"
+// ------------------------ Properties ----------------------------
+string casename = "moore";
+// string casename = "moore_frac_nonzeroalpha_bhp(t)";
+bool OUTPUT = true;
+bool RESTART = false;
+// Dimensions
+real flen = 50; // fracture half-lengh
+real fwidth = 0.0025; // fracture width
+real xSize = 1200; //
+real ySize = 1200; //
+real Thickness = 100*ft;
+// Elastic
+real E = 2e5*psia; // Young's modulus
+real nu = 0.339; // Poisson's ratio
+// Poroelasticfor
+real b = 0.8; // Biot coefficient
+// Filtration
+real phi0 = 0.10; // initial porosity
+real k0 = 30*mDa; // permeability
+real kmin = 1*mDa; // min limiting perm
+real kmax = 100*mDa; // max limiting perm
+real alpha = 0.25e-6; // k = k0*exp(-alpha*(sigma-sigma0))
+real mu = 0.00018; // viscosity [Pa-s]
+real rhom = 1400; // matrix density
+// Adsorbtion
+real Vl = 0.0096; // m3/kg langmuir volume (they have 0.00945783)
+real Pl = 6.109e6; // langmuir pressure (they have 5.67e6)
+real el = 0.0127; // maximum swelling volumetric strain
+// Fluid
+real Psc = 1*atm; // standard condition pressure
+real rho0 = 0.71; // kg/m3 at Psc - to compute fluid in place
+// Solver
+real dtinit = 0.10, dt=dtinit; // initial time step
+real dtout = 50*day; // output interval
+real tmax = 6000*day; // time of simulation
+real cfl = 1000; // time-stepping condition
+// bc's
+real Pi = 1450*psia; // initial reservoir pressure
+// real Pw = 62.8*psia; // wellbore pressure
+real Pwinit = 1220*psia; // wellbore pressure
+real dpwdt = 0.5*psia/day;    // not done
+real Pwmin = 62.8*psia;
+real Sx = 16e6;
+real Sy = 16e6; // no displacement one
+
+func real getPressure(real t){
+  real td = t/day;
+  return 0.1835*td^2-2563*td+9e6;
+}
+casename = casename
+  + "_Pw_init_" + string(Pwinit)
+  + "_xf_" + string(flen)
+  + "_fwidth_" + string(fwidth)
+  + "_a_" + string(alpha*1e6)
+  + "_el_" + string(el)
+  + "_k0_" + string(k0/mDa)
+  ;
+
+// ------------------------ Geometry -------------------------------
+border Right (t=-ySize/2,ySize/2){ x=xSize/2; y=t;}
+border Left (t=ySize/2,-ySize/2){ x=-xSize/2; y=t;}
+border Top (t=xSize/2,-xSize/2){ x=t; y=ySize/2;}
+border Bottom(t=-xSize/2,xSize/2){ x=t; y=-ySize/2;}
+border Frac(t=2*pi,0){x=fwidth*cos(t);y=flen*sin(t);}
+int n = 10;
+int nfrac = 50;
+// plot(Top(5*n) + Bottom(5*n) + Left(5*n) + Right(5*n) + Frac(nfrac));
+mesh msh= buildmesh(
+    Top(n) + Bottom(n) + Left(n) + Right(n)
+  + Frac(nfrac)
+  );
+// plot(msh,wait=1);
+// ------------------------ Coeffs -------------------------------
+real lambda = E*nu/((1+nu)*(1-2*nu)); // Lame constant
+real G = E/(2*(1.+nu)); // shear modulus
+real K = lambda + 2./3*G; // bulk modulus of the solid
+real Ks = K/(1-b); // bulk modulus of solid
+real Nm = Ks/(b-phi0); //modulus relating pore pressure to the porosity variation
+// ------------------------ FE spaces -------------------------------
+fespace PWConstant(msh,[P0]);
+fespace Pressure(msh,[P1]);
+fespace Displacement(msh,[P2]);
+fespace DisplacementGradinent(msh,[P1]);
+Displacement u1, u2, u10, u20,
+             v1, v2, u1init, u2init;
+DisplacementGradinent sigmaxx,sigmayy,Sxx,Syy;
+Pressure p,p0,pp,PRGC; // trial and previous time step pressure
+PWConstant phi, rho,k, SigMean,SigTerzMean, qx, qy, Sswel,
+           FIP, InPores, Sorbed;
+// make linear angle coordinate
+// ------------------------ Get element size ----------------------------------
+fespace Ph(msh,P0);
+Ph ph = hTriangle;
+real msize = ph[].min;
+
+// ------------------------ Macros ----------------------------------
+macro div(u1,u2) (dx(u1) + dy(u2)) // eom
+
+macro grad(p) [ dx(p), dy(p)] // eom
+
+macro ev(u1,u2) (dx(u1) + dy(u2)) // volumetric strain
+
+macro e(u1,u2)
+  [
+    dx(u1),
+    (dy(u1)+dx(u2))/2,
+    (dx(u2)+dy(u1))/2,
+    dy(u2)
+  ]
+  // eps_xx, eps_xy, eps_yx, eps_yy
+
+macro sigma(u1,u2)
+  [
+    (lambda+2.*G)*e(u1,u2)[0] + lambda*e(u1,u2)[3],
+    2.*G*e(u1,u2)[1],
+    2.*G*e(u1,u2)[2],
+    lambda*e(u1,u2)[0] + (lambda+2.*G)*e(u1,u2)[3]
+  ] // effective stress sxx,sxy,syx,syy
+
+// ------------------------ Problem ----------------------------------
+real Sigx = (Sx-b*Pi);
+real Sigy = (Sy-b*Pi);
+real SigMean0 = (Sigx+Sigy)/2;
+real SigTerzMean0 = (Sx+Sy-2*Pi)/2;
+u10 = -1./E*(Sigx*(1-nu^2)-nu*Sigy*(1+nu))*x;
+u20 = -1./E*(Sigy*(1-nu^2)-nu*Sigx*(1+nu))*y;
+u1init = u10;u2init=u20;
+p0 = Pi*x^0;
+phi = phi0;
+// SigEff = SigEff0;
+// k = k0*exp(-alpha*(SigEff-SigEff0));
+real dispRS = u10(xSize/2,0);
+real dispLS = u10(-xSize/2,0);
+real dispTS = u20(0,ySize/2);
+real dispBS = u20(0,-ySize/2);
+real Pw = Pwinit;
+
+problem Sorbtion([u1,u2,p],[v1,v2,pp]) =
+  // LHS
+    // body equilibrium
+        int2d(msh) (  sigma(u1,u2)'*e(v1,v2)  )
+        // pressure effect
+      - int2d(msh) (  b*p*ev(v1,v2)  )
+        // sorbtion swelling
+      - int2d(msh) (  K*el*p/(p0+Pl) *ev(v1,v2)  )
+      + int2d(msh) (  K*el*Pi/(Pi+Pl)*ev(v1,v2)  )
+    // pressure equation terms
+      //
+      + int2d(msh) (  phi*p/dt * pp  )
+      - int2d(msh) (  phi*p0/dt * pp  )
+
+      + int2d(msh) (  b*p0*ev(u1,u2)/dt * pp  )
+      - int2d(msh) (  b*p0*ev(u10,u20)/dt * pp  )
+
+      + int2d(msh) (  p0/Nm * p/dt *pp )
+      - int2d(msh) (  p0/Nm * p0/dt *pp )
+
+      + int2d(msh) (  k/mu*grad(p)'*grad(pp)*p0  )
+    // Adsorbtion terms
+      //
+      - int2d(msh) (  b*Psc*rhom*Vl*p0/(p0+Pl)*ev(u1,u2)/dt *pp )
+      + int2d(msh) (  b*Psc*rhom*Vl*p0/(p0+Pl)*ev(u10,u20)/dt *pp )
+      //
+      - int2d(msh) (  Psc*rhom*Vl/Nm*p0/(p0+Pl)*p/dt *pp )
+      + int2d(msh) (  Psc*rhom*Vl/Nm*p0/(p0+Pl)*p0/dt *pp )
+      //
+      + int2d(msh) (  (1-phi)*Psc*rhom*Vl*Pl/(p0+Pl)^2*p/dt *pp )
+      - int2d(msh) (  (1-phi)*Psc*rhom*Vl*Pl/(p0+Pl)^2*p0/dt *pp )
+
+  // RHS
+    // Solid BC'c
+      // Displacement
+        + on (Left,  u1 = dispLS)
+        + on (Bottom,u2 = dispBS)
+        + on (Top,   u2 = dispTS)
+        + on (Right, u1 = dispRS)
+        // + on (Frac, u1=0, u2=0)
+        + on (Frac, u1=fwidth*sqrt(1-y^2/flen^2)*x/abs(x))
+
+        // + on (Well,  u1 = 0, u2=0)
+        // + int1d(msh,Right) (Sx*v1)
+      // pressure
+        // + on (Left,  p = Pi)
+        // + on (Top,  p = Pi)
+        // + on (Right,  p = Pi)
+        // + on (Bottom,   p  = Pw )
+        + on (Frac, p = Pw)
+      // surface tractions (Neumann)
+        // + int1d(msh,Top) ( Sv*v2*N.y )
+
+  ;
+
+// Prepare some variables to save output
+string casefolder = casename + "_results";
+// first remove the old results
+system("rm -rf " + casefolder);
+// then create a firectory for the new results
+system("mkdir " + casefolder);
+
+real Q, Qcum, Qm, FIPTotal,SorbedTotal,InPoresTotal;
+real epsvMean, SigMeanAv,pMean, keff;
+real t = 0;
+int vtki = 0;
+
+
+if (OUTPUT){
+  ofstream ff(casename + "-drawdown.txt");
+  ff << "t"<<UnitsOutput(dtout)
+     << "\tQ (mscf/d)\tcum vol (mscf)"
+     << "\tcum mass (kg)\tFIP (kg)"
+     << "\tSorbed(kg)\tepsv\tSswell(Pa)\tPmean(Pa)"
+     << "\tk_eff (mDa)"
+     << "\tBHP"
+     << endl;
+}
+
+while (t<=tmax) {
+  // Pw = Pwinit - dpwdt*t;
+  Pw = getPressure(t);
+  if (Pw<Pwmin) Pw = Pwmin;
+  cout << "BHP (psi)" << Pw/psia << endl;
+  phi = phi0 + b*div(u10,u20) - b*div(u1init,u2init) + (p0-Pi)/Nm;
+  Sswel = K*el*(p0/(p0+Pl) - Pi/(Pi+Pl));
+  // cout << Sswel[].max << endl;
+  sigmaxx = sigma(u10,u20)[0] - Sswel;
+  sigmayy = sigma(u10,u20)[3] - Sswel;
+  Sxx = sigmaxx - b*p0;
+  Syy = sigmayy - b*p0;
+  SigMean = -(sigmaxx + sigmayy)/2;
+  SigTerzMean = (-Sxx-Syy-2*p0)/2; // terzagi minimum effective stress
+  if (t==0) SigTerzMean0 = SigTerzMean0;
+  // cout << -Sxx(xSize/2,0) << "\t" << -Syy(xSize/2,0) << endl;
+  // cout << SigTerzMean(xSize/2,0) << "\t" << SigTerzMean0 << endl;
+  // options for permeability change
+  k = k0*exp(-alpha*(SigTerzMean-SigTerzMean0)); // function of terzagi stress
+  Truncate(k[], kmin, kmax);
+  // k = k0*exp(-alpha*(SigMean-SigMean0)); // function of effective stress
+  // k = k0; // constant
+  rho = p0/Psc*rho0;
+  PRGC = Vl*p0/(p0+Pl); // potential releasable gas content (kg/m3) -- sorbed
+  InPores = phi*rho;
+  Sorbed = PRGC*rhom*(1-phi);
+  FIP = Sorbed + InPores;
+  InPoresTotal = int2d(msh) (InPores*Thickness);
+  SorbedTotal = int2d(msh) (Sorbed*Thickness);
+  FIPTotal = (SorbedTotal+InPoresTotal);
+  qx = -k/mu*dx(p0); qy = -k/mu*dy(p0);
+  Q = int1d(msh,Frac) ( sqrt(qx^2 + qy^2) );
+  Q = Q*Pw/Psc; // to standard cubic meters
+  Q *= Thickness;
+  Qcum += Q*dt;
+  Qm = Qcum*rho0; // mass inflow
+  real permMean = k[].sum/k[].n;
+  real permMax = k[].max;
+  real permMin = k[].min;
+  // real permEff = mu*(Q/Thickness)*Psc/pi/(p0(0,ySize/2)^2-Pw^2)*(log(xSize/R - 0.75));
+  real permEff = permMean;
+  epsvMean = int2d(msh) (ev(u10,u20)/xSize/ySize);
+  SigMeanAv = int2d(msh) (SigMean/xSize/ySize); // average mean effective stress
+  pMean = int2d(msh) (p0/xSize/ySize);
+  real SswelAv = int2d(msh) (Sswel/xSize/ySize);
+
+  // output
+  if (OUTPUT){
+    cout << "(mDa) perm (min|max|av|eff) "
+         << permMin/mDa<<" | "
+         << permMax/mDa<<" | "
+         << permMean/mDa<<" | "
+         << permEff/mDa<<" | "
+         << endl;
+    cout << "(Pa) SigmaTerz|Swelling|Press|BHP \t"
+         << SigTerzMean <<" | "
+         << SswelAv <<" | "
+         << pMean <<" | "
+         << Pw <<" | "
+         << endl;
+    cout << "FIP, kg " << FIPTotal << endl;
+
+    {ofstream ff(casename +"-drawdown.txt", append);
+      // ff <<
+      // Qcum = Qcum/ft^3/1000; //converto to mscf
+      Q = Q/ft^3*day/1000; //converto to mscf/d
+      ff << ValueOutput(t,dtout) << "\t" << Q << "\t" << Qcum/ft^3/1000 << "\t"
+         << Qm       << "\t" << FIPTotal <<"\t" << SorbedTotal << "\t"
+         << epsvMean << "\t" << SigTerzMean << "\t" << pMean << "\t"
+         << permEff/mDa << "\t"
+         << Pw
+         << endl;
+    }
+    if (t>=vtki*dtout || t==dtinit){
+      savevtk(casefolder+"/"+casename+vtki+".vtk",
+              msh,t,[u10,u20,0],[qx,qy,0],-sigmaxx,-sigmayy, -Sxx, -Syy,
+              Sswel,p0,phi,
+              k/mDa,FIP,Sorbed, InPores,
+              dataname="t u v Sig_xx Sig_yy Sxx Syy Sswell p phi "
+              +"k FIP Sorbed InPores");
+      // Output data for restart
+      {ofstream ff("pressure.txt");ff<<p[];}
+      {ofstream ff("u1.txt");ff<<u1[];}
+      {ofstream ff("u2.txt");ff<<u1[];}
+      {ofstream ff("t.txt"); ff<<t;}
+      vtki ++;
+    }
+  }
+
+  if (t>0.0){
+    real maxqx = max(abs(qx[].max),abs(qx[].min));
+    real maxqy = max(abs(qy[].max),abs(qy[].min));
+    real maxq = sqrt(maxqx^2+maxqy^2);
+    if (maxq!=0) dt = msize/maxq*cfl;
+    if (dt>dtout) dt = dtout;
+  }
+
+  cout << "Time = " << ValueOutput(t,dtout) << UnitsOutput(dtout)
+       << "\tdt = " << ValueOutput(dt,dtout) << UnitsOutput(dtout)
+       << endl;
+  Sorbtion;
+  Truncate(p[],min(Pw,Pi),max(Pw,Pi));
+
+
+  // plot(k,wait=0,value=1,fill=1);
+  plot(p,wait=0,value=1,fill=1);
+  // Prepare time step
+  p0 = p;
+  u10 = u1;
+  u20 = u2;
+  t += dt;
+}
+// cout << "Done computing" << endl;
